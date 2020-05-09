@@ -47,7 +47,7 @@ class MacaronDB(dict):
         else:
             self.load()
             self._names = [name.strip() for name in open(MacaronDB.NAMES_FILE, 'r').readlines()]
-            self._available_names = np.ones(len(self.__names), dtype=bool)
+            self._available_names = np.ones(len(self._names), dtype=bool)
             MacaronDB.__db = self
 
     def load(self):
@@ -67,12 +67,12 @@ class MacaronDB(dict):
         available_names_indices = self._available_names.nonzero()[0]
         if available_names_indices.size == 0:
             self._names = [name.strip() for name in open(MacaronDB.NAMES_FILE, 'r').readlines()]
-            self._available_names = np.ones(len(self.__names), dtype=bool)
-            available_names_indices = np.arange(len(self.__names))
+            self._available_names = np.ones(len(self._names), dtype=bool)
+            available_names_indices = np.arange(len(self._names))
         index = np.random.randint(available_names_indices.size)
         self._available_names[index] = False
 
-        return '{0}_{1}'.format(MacaronDB.__names[index], id)
+        return '{0}_{1}'.format(self._names[index], id)
 
     def get_box_by_id(self, id):
         for box in self['boxes']:
