@@ -6,17 +6,33 @@ import pickle
 
 import numpy as np
 import telegram.error
-from telegram.ext import Updater, CommandHandler
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler
 
 
 fmt = '%Y-%m-%d %H:%M:%S'
 token = os.getenv('MACARON_BOT_API_TOKEN')
+admin_chat_id = int(os.getenv('TELEGRAM_ADMIN_ID'))
 
 fail_chance = 0.05
+
+PLACEHOLDERS = '🥂🍷🍸🍹🍾'
+N_PH = len(PLACEHOLDERS)
+
+
+IMAGES_EXIST = False
+if os.path.exists('images'):
+    IMAGES_EXIST = True
+
+
+class EmptyBoxException(Exception):
+    pass
 
 
 class MacaronDB(dict):
     DB_PATH = 'data/db.pkl'
+    NAMES_FILE = 'data/names.txt'
+
     __db = None
 
     @staticmethod
@@ -30,72 +46,81 @@ class MacaronDB(dict):
             raise Exception("This class is a singleton!")
         else:
             self.load()
+            self._names = [name.strip() for name in open(MacaronDB.NAMES_FILE, 'r').readlines()]
+            self._available_names = np.ones(len(self.__names), dtype=bool)
             MacaronDB.__db = self
 
     def load(self):
         self.clear()
         if os.path.exists(MacaronDB.DB_PATH):
             with open(MacaronDB.DB_PATH, 'rb') as f:
-                self.update({key: MacaronBox().from_numpy(value) for (key, value) in pickle.load(f).items()})
+                self.update(pickle.load(f))
+        else:
+            self.update({'users': {}, 'boxes': []})
 
     def save(self):
         print('{}: saving DB...'.format(datetime.datetime.now().strftime(fmt)))
         with open(MacaronDB.DB_PATH, 'wb') as f:
-            pickle.dump({key: value.box for (key, value) in self.items()}, f)
+            pickle.dump(self, f)
+
+    def create_unique_name(self, id):
+        available_names_indices = self._available_names.nonzero()[0]
+        if available_names_indices.size == 0:
+            self._names = [name.strip() for name in open(MacaronDB.NAMES_FILE, 'r').readlines()]
+            self._available_names = np.ones(len(self.__names), dtype=bool)
+            available_names_indices = np.arange(len(self.__names))
+        index = np.random.randint(available_names_indices.size)
+        self._available_names[index] = False
+
+        return '{0}_{1}'.format(MacaronDB.__names[index], id)
+
+    def get_box_by_id(self, id):
+        for box in self['boxes']:
+            if box['id'] == id:
+                return box
+        return None
+
+    def get_box_by_name(self, name):
+        for index, box in enumerate(self['boxes']):
+            if box['name'] == name:
+                return index, box
+        return None, None
 
 
-class MacaronBox():
-    class EmptyBoxException(Exception):
-        pass
+def mb_to_text(box):
+    text_array = np.empty_like(box, dtype=np.unicode_)
+    for i in range(box.shape[0]):
+        for j in range(box.shape[1]):
+            if box[i, j]:
+                text_array[i, j] = '🍪'
+            else:
+                text_array[i, j] = PLACEHOLDERS[np.random.randint(N_PH)]
+    with io.StringIO() as s:
+        np.savetxt(s, text_array, fmt='%s', delimiter='')
+        text_box = s.getvalue()
+    return text_box
 
-    _placeholders = '🥂🍷🍸🍹🍾'
-    _n_ph = len(_placeholders)
 
-    def __init__(self, width=None, height=None):
-        if width is not None and height is not None:
-            self.set_box(width, height)
+def mb_left(box):
+    return box.nonzero()[0].size
 
-    def from_numpy(self, array):
-        self.box = np.copy(array)
-        return self
 
-    def set_box(self, width, height):
-        self.box = np.ones((height, width), dtype=bool)
+def mb_get(box):
+    available_macarons = np.asarray(box.nonzero()).transpose()
+    index = np.random.randint(available_macarons.shape[0])
+    return available_macarons[index]
+
+
+def mb_eat(box, loc):
+    result = False
+    if box[loc[0], loc[1]]:
+        box[loc[0], loc[1]] = 0
+        result = True
         MacaronDB.db().save()
-
-    def to_text(self):
-        text_array = np.empty_like(self.box, dtype=np.unicode_)
-        for i in range(self.box.shape[0]):
-            for j in range(self.box.shape[1]):
-                if self.box[i, j]:
-                    text_array[i, j] = '🍪'
-                else:
-                    text_array[i, j] = MacaronBox._placeholders[np.random.randint(MacaronBox._n_ph)]
-        with io.StringIO() as s:
-            np.savetxt(s, text_array, fmt='%s', delimiter='')
-            text_box = s.getvalue()
-        return text_box
-
-    def get_macaron(self):
-        available_macarons = np.asarray(self.box.nonzero()).transpose()
-        index = np.random.randint(available_macarons.shape[0])
-        return available_macarons[index]
-
-    def eat_macaron(self, loc):
-        result = False
-        if self.box[loc[0], loc[1]]:
-            self.box[loc[0], loc[1]] = 0
-            result = True
-            MacaronDB.db().save()
-        available_macarons = np.asarray(self.box.nonzero())
-        if available_macarons.size == 0:
-            raise MacaronBox.EmptyBoxException()
-        return result
-
-    def feed(self):
-        loc = self.get_macaron().tolist()
-        self.eat_macaron(loc[0], *loc)
-        return loc
+    available_macarons = np.asarray(box.nonzero())
+    if available_macarons.size == 0:
+        raise EmptyBoxException()
+    return result
 
 
 def error(update, context, error):
@@ -122,64 +147,222 @@ def error(update, context, error):
         pass
 
 
+def permission(update, context):
+    query = update.callback_query
+    query.answer()
+
+    if query.data[0] == '1':
+        data = query.data.split(':')
+        eater_id, box_id = data[1], data[2]
+        eater = MacaronDB.db()['users'][eater_id]
+        eater['eats'] += [box_id]
+        if eater['default'] is None:
+            eater['default'] = box_id
+        box = MacaronDB.db().get_box_by_id(box_id)
+        box['eaters'] += eater_id
+        MacaronDB.db().save()
+        context.bot.send_message(chat_id=eater_id, text='Permission granted. Enjoy the macarons!')
+    else:
+        context.bot.send_message(chat_id=eater_id, text='DENIED! DENIED! DENIED! РУКИ ПРОЧЬ ОТ ЧУЖИХ МАКАРОН!')
+
+
+def add_user(update, context):
+    chat_id = update.effective_chat.id
+    if chat_id not in MacaronDB.db()['users']:
+        new_user = {
+            'owns': [],
+            'eats': [],
+            'default': None
+        }
+        MacaronDB.db()['users'][chat_id] = new_user
+        MacaronDB.db().save()
+
+
 def start(update, context):
-    context.bot.send_message(chat_id=update.effective_chat.id, text='Congrats on buying that macaron box! Now you can start eating them. If you need my help, refer to the list of commands.')
+    chat_id = update.effective_chat.id
+    context.bot.send_message(chat_id=chat_id, text='Congrats on buying that macaron box! Now you can start eating them. If you need my help, refer to the list of commands.')
+    add_user(update, context)
+    if IMAGES_EXIST:
+        with open('images/macarons-1.gif', 'rb') as f:
+            context.bot.send_animation(chat_id=chat_id, animation=f)
 
 
-def set_box(update, context):
+def add_box(update, context):
+    add_user(update, context)
     chat_id = update.effective_chat.id
     try:
         dimensions = list(map(np.uint8, context.args))
-        if chat_id in MacaronDB.db():
-            context.bot.send_message(chat_id=chat_id, text='You already have one box of the macarons.')
+        if len(dimensions) != 2:
+            raise ValueError()
+        if len(MacaronDB.db()['boxes']) > 0:
+            new_box_id = MacaronDB.db()['boxes'][-1]['id'] + 1
         else:
-            MacaronDB.db()[chat_id] = MacaronBox(*dimensions)
-            context.bot.send_message(chat_id=chat_id, text='The box is set!')
-            show_box(update, context)
+            new_box_id = 0
+        new_box = {
+            'id': new_box_id,
+            'name': MacaronDB.db().create_unique_name(new_box_id),
+            'owner': chat_id,
+            'eaters': [],
+            'data': np.ones(dimensions, dtype=bool)
+        }
+        MacaronDB.db()['boxes'].append(new_box)
+        MacaronDB.db()['users'][chat_id]['owns'].append(new_box_id)
+        MacaronDB.db()['users'][chat_id]['default'] = new_box_id
+        MacaronDB.db().save()
+        context.bot.send_message(chat_id=chat_id, text='The box {} is set as default and ready to be eaten!'.format(new_box['name']))
+        show_box(update, context)
     except Exception:
-        context.bot.send_message(chat_id=chat_id, text='The dimensions of the box should be two positive integers.')
+        context.bot.send_message(chat_id=chat_id, text='Something went wrong... Check your arguments.')
+
+
+def request_share(update, context):
+    chat_id = update.effective_chat.id
+    user = MacaronDB.db()['users'].get(chat_id, None)
+    if user:
+        if len(context.args) != 1:
+            raise ValueError('Wrong arguments.')
+        box_name = context.args[0]
+        _, box = MacaronDB.db().get_box_by_name(box_name)
+
+        if box:
+            keyboard = [[InlineKeyboardButton('✔️', callback_data='1:{}:{}'.format(chat_id, box['id'])),
+                         InlineKeyboardButton('❌', callback_data='0:{}:{}'.format(chat_id, box['id']))]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            update.message.reply_text('{} asks for the unlimited and unconditional control over your macarons in the {} box. Do you allow that?', reply_markup=reply_markup)
+
+
+def set_default(update, context):
+    chat_id = update.effective_chat.id
+    user = MacaronDB.db()['users'].get(chat_id, None)
+    if user:
+        if len(context.args) != 1:
+            raise ValueError('Wrong arguments.')
+        box_name = context.args[0]
+        _, box = MacaronDB.db().get_box_by_name(box_name)
+        if not box or (box['owner'] != chat_id and chat_id not in box['eaters']):
+            context.bot.send_message(chat_id=chat_id, text="Can't find it.")
+        else:
+            user['default'] = box['id']
+            context.bot.send_message(chat_id=chat_id, text="New default box is set.")
+    else:
+        context.bot.send_message(chat_id=chat_id, text="You are not registered with our exceptional service.")
 
 
 def show_box(update, context):
     chat_id = update.effective_chat.id
-    if chat_id in MacaronDB.db():
-        text_box = MacaronDB.db()[chat_id].to_text()
-        context.bot.send_message(chat_id=chat_id, text=text_box)
+    user = MacaronDB.db()['users'].get(chat_id, None)
+    if user:
+        box = None
+        if len(context.args) == 1:
+            box_name = context.args[0]
+            _, box = MacaronDB.db().get_box_by_name(box_name)
+            if not box or (box['owner'] != chat_id and chat_id not in box['eaters']):
+                context.bot.send_message(chat_id=chat_id, text="Can't find it.")
+        else:
+            box_id = user['default']
+            if box_id is not None:
+                box = MacaronDB.db().get_box_by_id(box_id)
+            else:
+                context.bot.send_message(chat_id=chat_id, text="You don't have default box set.")
+        if box:
+            text_box = mb_to_text(box['data'])
+            context.bot.send_message(chat_id=chat_id, text=text_box)
     else:
-        context.bot.send_message(chat_id=chat_id, text="You don't have any macaron boxes.")
+        context.bot.send_message(chat_id=chat_id, text="You are not registered with our exceptional service.")
+
+
+def show_name(update, context):
+    chat_id = update.effective_chat.id
+    user = MacaronDB.db()['users'].get(chat_id, None)
+    if user:
+        box_id = user['default']
+        if box_id is not None:
+            box = MacaronDB.db().get_box_by_id(box_id)
+            context.bot.send_message(chat_id=chat_id, text=box['name'])
+        else:
+            context.bot.send_message(chat_id=chat_id, text="You don't have default box set.")
+    else:
+        context.bot.send_message(chat_id=chat_id, text="You are not registered with our exceptional service.")
+
+
+def show_all(update, context):
+    chat_id = update.effective_chat.id
+    user = MacaronDB.db()['users'].get(chat_id, None)
+    if user:
+        n_box_ids = len(user['owns']) + len(user['eats'])
+        if n_box_ids > 0:
+            msg = ''
+            if len(user['owns']) > 0:
+                msg += 'Owner:\n'
+                for box_id in user['owns']:
+                    box = MacaronDB.db().get_box_by_id(box_id)
+                    msg += '{0}: {1}x{2}, {3} left\n'.format(box['name'], box['data'].shape[0], box['data'].shape[1], mb_left(box['data']))
+            if len(user['eats']) > 0:
+                msg += 'Not an owner:\n'
+                for box_id in user['eats']:
+                    box = MacaronDB.db().get_box_by_id(box_id)
+                    msg += '{0}: {1}x{2}, {3} left\n'.format(box['name'], box['data'].shape[0], box['data'].shape[1], mb_left(box['data']))
+            context.bot.send_message(chat_id=chat_id, text=msg)
+        else:
+            context.bot.send_message(chat_id=chat_id, text="You don't have any macaron boxes.")
+    else:
+        context.bot.send_message(chat_id=chat_id, text="You are not registered with our exceptional service.")
 
 
 def get_macaron(update, context):
     chat_id = update.effective_chat.id
     location = None
-    if chat_id in MacaronDB.db():
-        location = MacaronDB.db()[chat_id].get_macaron()
-        context.bot.send_message(chat_id=chat_id, text='Picked a macaron at row {0} and column {1}.'.format(*((location + 1).tolist())))
-        if np.random.random() < fail_chance:
-            '{}: FAIL!!!'.format(datetime.datetime.now().strftime(fmt))
-            context.bot.send_message(chat_id=chat_id, text='А НУ ПОЛОЖИ МАКАРОН НА МЕСТО!'.format(*(location.tolist())))
-            location = None
+    user = MacaronDB.db()['users'].get(chat_id, None)
+    if user:
+        box_id = user['default']
+        if box_id is not None:
+            box = MacaronDB.db().get_box_by_id(box_id)['data']
+            try:
+                location = mb_get(box)
+            except EmptyBoxException:
+                context.bot.send_message(chat_id=chat_id, text='НАТАША, ВСТАВАЙ, ШПИНАТ ВСЁ СЪЕЛА!')
+            else:
+                context.bot.send_message(chat_id=chat_id, text='Picking a macaron at row {0} and column {1}.'.format(*((location + 1).tolist())))
+                if np.random.random() < fail_chance:
+                    '{}: FAIL!!!'.format(datetime.datetime.now().strftime(fmt))
+                    context.bot.send_message(chat_id=chat_id, text='А НУ ПОЛОЖИ МАКАРОН НА МЕСТО!'.format(*(location.tolist())))
+                    location = None
+        else:
+            context.bot.send_message(chat_id=chat_id, text="You don't have default box set.")
     else:
-        context.bot.send_message(chat_id=chat_id, text="You don't have any macaron boxes.")
+        context.bot.send_message(chat_id=chat_id, text="You are not registered with our exceptional service.")
     return location
 
 
 def eat_macaron_by_loc(update, context, location):
     chat_id = update.effective_chat.id
-    if chat_id in MacaronDB.db():
-        try:
-            result = MacaronDB.db()[chat_id].eat_macaron(location)
-        except MacaronBox.EmptyBoxException:
-            context.bot.send_message(chat_id=chat_id, text='СКОЛЬКО МОЖНО ЖРАТЬ???')
-        except IndexError:
-            context.bot.send_message(chat_id=chat_id, text='Your box is not that big.')
+    user = MacaronDB.db()['users'].get(chat_id, None)
+    if user:
+        box_id = user['default']
+        if box_id is not None:
+            box = MacaronDB.db().get_box_by_id(box_id)['data']
+            try:
+                result = mb_eat(box, location)
+            except EmptyBoxException:
+                if IMAGES_EXIST:
+                    with open('images/macarons-2.gif', 'rb') as f:
+                        context.bot.send_animation(chat_id=chat_id, animation=f)
+                context.bot.send_message(chat_id=chat_id, text='НУ СКОЛЬКО МОЖНО ЖРАТЬ???')
+            except IndexError:
+                context.bot.send_message(chat_id=chat_id, text='Something went wrong with those coordinates.')
+            else:
+                msg = 'Yummy-yummy.'
+                if not result:
+                    if IMAGES_EXIST:
+                        with open('images/macaron-gone.gif', 'rb') as f:
+                            context.bot.send_animation(chat_id=chat_id, animation=f)
+                    msg = "МАКАРОН БЫЛ СЪЕДЕН ШПИНАТОМ."
+                context.bot.send_message(chat_id=chat_id, text=msg)
         else:
-            msg = 'Yummy-yummy.'
-            if not result:
-                msg = "МАКАРОН БЫЛ СЪЕДЕН ШПИНАТОМ."
-            context.bot.send_message(chat_id=chat_id, text=msg)
+            context.bot.send_message(chat_id=chat_id, text="You don't have any macaron boxes.")
     else:
-        context.bot.send_message(chat_id=chat_id, text="You don't have any macaron boxes.")
+        context.bot.send_message(chat_id=chat_id, text="You are not registered with our exceptional service.")
+    return location
 
 
 def eat_macaron(update, context):
@@ -193,18 +376,42 @@ def feed_macaron(update, context):
         eat_macaron_by_loc(update, context, location)
 
 
-def reset(update, context):
+def remove_box(update, context):
     chat_id = update.effective_chat.id
-    if chat_id not in MacaronDB.db():
-        context.bot.send_message(chat_id=chat_id, text="You don't have any macaron boxes.")
+    user = MacaronDB.db()['users'].get(chat_id, None)
+    if user:
+        box_name = context.args[0]
+        index, box = MacaronDB.db().get_box_by_name(box_name)
+        if box:
+            if box['owner'] == chat_id:
+                user['owns'].remove(box['id'])
+                if user['default'] == box['id']:
+                    user['default'] = None
+                for eater_id in box['eaters']:
+                    eater = MacaronDB.db()[eater_id]
+                    eater['uses'].remove(box['id'])
+                    if eater['default'] == box['id']:
+                        eater['default'] = None
+                MacaronDB.db()['boxes'].pop(index)
+                MacaronDB.db().save()
+                context.bot.send_message(chat_id=chat_id, text="The box was successfully removed.")
+            else:
+                context.bot.send_message(chat_id=chat_id, text="НЕ ТВОЯ, ПОЛОЖЬ НА МЕСТО!")
+        else:
+            context.bot.send_message(chat_id=chat_id, text="Can't find it.")
     else:
-        MacaronDB.db().pop(chat_id)
-        context.bot.send_message(chat_id=chat_id, text="You don't have a macaron box anymore.")
+        context.bot.send_message(chat_id=chat_id, text="You are not registered with our exceptional service.")
+
+
+def admin(update, context):
+    chat_id = update.effective_chat.id
+    if chat_id == admin_chat_id:
+        context.bot.send_message(chat_id=chat_id, text=str(MacaronDB.db()))
 
 
 def main():
     # load the base of macaron boxes
-    # MacaronDB.db().load()
+    MacaronDB.db()
 
     # set up logging
     logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -215,13 +422,19 @@ def main():
 
     # bot commands
     dispatcher.add_handler(CommandHandler('start', start))
-    dispatcher.add_handler(CommandHandler('set', set_box))
+    dispatcher.add_handler(CommandHandler('add', add_box))
+    dispatcher.add_handler(CommandHandler('request', request_share))
+    dispatcher.add_handler(CommandHandler('set_default', set_default))
     dispatcher.add_handler(CommandHandler('show', show_box))
+    dispatcher.add_handler(CommandHandler('show_name', show_name))
+    dispatcher.add_handler(CommandHandler('show_all', show_all))
     dispatcher.add_handler(CommandHandler('get', get_macaron))
     dispatcher.add_handler(CommandHandler('eat', eat_macaron))
     dispatcher.add_handler(CommandHandler('feed', feed_macaron))
-    dispatcher.add_handler(CommandHandler('reset', reset))
+    dispatcher.add_handler(CommandHandler('remove', remove_box))
+    dispatcher.add_handler(CommandHandler('admin', admin))
 
+    dispatcher.add_handler(CallbackQueryHandler(permission))
     dispatcher.add_error_handler(error)
 
     updater.start_polling()
