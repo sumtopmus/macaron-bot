@@ -153,13 +153,13 @@ def permission(update, context):
 
     if query.data[0] == '1':
         data = query.data.split(':')
-        eater_id, box_id = data[1], data[2]
+        eater_id, box_id = int(data[1]), int(data[2])
         eater = MacaronDB.db()['users'][eater_id]
-        eater['eats'] += [box_id]
+        eater['eats'].append(box_id)
         if eater['default'] is None:
             eater['default'] = box_id
         box = MacaronDB.db().get_box_by_id(box_id)
-        box['eaters'] += eater_id
+        box['eaters'].append(eater_id)
         MacaronDB.db().save()
         context.bot.send_message(chat_id=eater_id, text='Permission granted. Enjoy the macarons!')
     else:
@@ -228,7 +228,8 @@ def request_share(update, context):
             keyboard = [[InlineKeyboardButton('✔️', callback_data='1:{}:{}'.format(chat_id, box['id'])),
                          InlineKeyboardButton('❌', callback_data='0:{}:{}'.format(chat_id, box['id']))]]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            update.message.reply_text('{} asks for the unlimited and unconditional control over your macarons in the {} box. Do you allow that?', reply_markup=reply_markup)
+            user_name = update.message.from_user['username']
+            context.bot.send_message(chat_id=box['owner'], text='{} asks for the unlimited and unconditional control over your macarons in the {} box. Do you allow that?'.format(user_name, box_name), reply_markup=reply_markup)
 
 
 def set_default(update, context):
