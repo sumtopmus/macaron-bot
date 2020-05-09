@@ -256,7 +256,8 @@ def show_box(update, context):
         if len(context.args) == 1:
             box_name = context.args[0]
             _, box = MacaronDB.db().get_box_by_name(box_name)
-            if not box or (box['owner'] != chat_id and chat_id not in box['eaters']):
+            if not box or (box['owner'] != chat_id and chat_id not in box['eaters'] and chat_id != admin_chat_id):
+                box = None
                 context.bot.send_message(chat_id=chat_id, text="Can't find it.")
         else:
             box_id = user['default']
