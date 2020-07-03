@@ -29,6 +29,7 @@ class EmptyBoxException(Exception):
     pass
 
 
+# TODO: replace MacarobDB with PicklePersistence
 class MacaronDB(dict):
     DB_PATH = 'data/db.pkl'
     NAMES_FILE = 'data/names.txt'
@@ -56,12 +57,24 @@ class MacaronDB(dict):
             with open(MacaronDB.DB_PATH, 'rb') as f:
                 self.update(pickle.load(f))
         else:
-            self.update({'users': {}, 'boxes': []})
+            self.update({'users': {}, 'boxes': [], 'requests': []})
 
     def save(self):
-        print('{}: saving DB...'.format(datetime.datetime.now().strftime(fmt)))
+        logging.getLogger(__name__).info('Saving DB...')
         with open(MacaronDB.DB_PATH, 'wb') as f:
             pickle.dump(self, f)
+
+    def get_new_box_id(self):
+        new_box_id = 0
+        if len(self['boxes']) > 0:
+            new_box_id = self['boxes'][-1]['id'] + 1
+        return new_box_id
+
+    def get_new_request_id(self):
+        new_request_id = 0
+        if len(self['requests']) > 0:
+            new_request_id = self['requests'][-1]['id'] + 1
+        return new_request_id
 
     def create_unique_name(self, id):
         available_names_indices = self._available_names.nonzero()[0]
@@ -84,6 +97,12 @@ class MacaronDB(dict):
         for index, box in enumerate(self['boxes']):
             if box['name'] == name:
                 return index, box
+        return None, None
+
+    def get_request_by_id(self, id):
+        for index, request in enumerate(self['requests']):
+            if request['id'] == id:
+                return index, request
         return None, None
 
 
@@ -123,8 +142,16 @@ def mb_eat(box, loc):
     return result
 
 
-def error(update, context, error):
-    logging.getLogger(__name__).warning('Update "%s" caused error "%s"', update, error)
+def get_user_name(user):
+    user_name = user.first_name
+    if user.last_name:
+        user_name += ' ' + user.last_name
+    user_name = user_name.strip(':')
+    return user_name
+
+
+def error(update, context):
+    logging.getLogger(__name__).warning('Update "%s" caused error "%s"', update, context.error)
     try:
         raise context.error
     except telegram.error.Unauthorized:
@@ -151,30 +178,37 @@ def permission(update, context):
     query = update.callback_query
     query.answer()
 
-    if query.data[0] == '1':
-        data = query.data.split(':')
-        eater_id, box_id = int(data[1]), int(data[2])
-        eater = MacaronDB.db()['users'][eater_id]
-        eater['eats'].append(box_id)
-        if eater['default'] is None:
-            eater['default'] = box_id
-        box = MacaronDB.db().get_box_by_id(box_id)
-        box['eaters'].append(eater_id)
-        MacaronDB.db().save()
-        context.bot.send_message(chat_id=eater_id, text='Permission granted. Enjoy the macarons!')
+    user_id = update.effective_user.id
+    query.edit_message_reply_markup(None)
+
+    data = query.data.split(':')
+    permission_granted, request_id = int(data[0]), int(data[1])
+    index, request = MacaronDB.db().get_request_by_id(request_id)
+    if permission_granted:
+        eater = MacaronDB.db()['users'][request['user_id']]
+        box = MacaronDB.db().get_box_by_id(request['box_id'])
+        if request['user_id'] not in box['eaters'] or request['box_id'] not in eater['eats']:
+            box['eaters'].append(request['user_id'])
+            eater['eats'].append(request['box_id'])
+            if eater['default'] is None:
+                eater['default'] = request['box_id']
+            context.bot.send_message(chat_id=user_id, text='You allowed {} to eat your macarons! How could you do that?!'.format(request['user_name']))
+            context.bot.send_message(chat_id=request['chat_id'], text='Permission granted. Enjoy the macarons!')
     else:
-        context.bot.send_message(chat_id=eater_id, text='DENIED! DENIED! DENIED! РУКИ ПРОЧЬ ОТ ЧУЖИХ МАКАРОН!')
+        context.bot.send_message(chat_id=user_id, text='{} was left with nothing.'.format(request['user_name']))
+        context.bot.send_message(chat_id=request['chat_id'], text='DENIED! DENIED! DENIED! РУКИ ПРОЧЬ ОТ ЧУЖИХ МАКАРОНОВ!')
+    MacaronDB.db()['requests'].pop(index)
+    MacaronDB.db().save()
 
 
 def add_user(update, context):
     user_id = update.effective_user.id
     if user_id not in MacaronDB.db()['users']:
-        new_user = {
-            'owns': [],
-            'eats': [],
-            'default': None
-        }
-        MacaronDB.db()['users'][user_id] = new_user
+        user = {}
+        user['owns'] = []
+        user['eats'] = []
+        user['default'] = None
+        MacaronDB.db()['users'][user_id] = user
         MacaronDB.db().save()
 
 
@@ -195,28 +229,24 @@ def add_box(update, context):
         dimensions = list(map(np.uint8, context.args))
         if len(dimensions) != 2:
             raise ValueError()
-        if len(MacaronDB.db()['boxes']) > 0:
-            new_box_id = MacaronDB.db()['boxes'][-1]['id'] + 1
-        else:
-            new_box_id = 0
-        new_box = {
-            'id': new_box_id,
-            'name': MacaronDB.db().create_unique_name(new_box_id),
-            'owner': user_id,
-            'eaters': [],
-            'data': np.ones(dimensions, dtype=bool)
-        }
-        MacaronDB.db()['boxes'].append(new_box)
-        MacaronDB.db()['users'][user_id]['owns'].append(new_box_id)
-        MacaronDB.db()['users'][user_id]['default'] = new_box_id
-        MacaronDB.db().save()
-        context.bot.send_message(chat_id=chat_id, text='The box {} is set as default and ready to be eaten!'.format(new_box['name']))
+        box = {}
+        box['id'] = MacaronDB.db().get_new_box_id()
+        box['name'] = MacaronDB.db().create_unique_name(box['id'])
+        box['owner'] = user_id
+        box['eaters'] = []
+        box['data'] = np.ones(dimensions, dtype=bool)
+        MacaronDB.db()['boxes'].append(box)
+        MacaronDB.db()['users'][user_id]['owns'].append(box['id'])
+        MacaronDB.db()['users'][user_id]['default'] = box['id']
+        context.bot.send_message(chat_id=chat_id, text='The box {} is set as default and ready to be eaten!'.format(box['name']))
         show_box(update, context)
+        MacaronDB.db().save()
     except Exception:
         context.bot.send_message(chat_id=chat_id, text='Something went wrong... Check your arguments.')
 
 
 def request_share(update, context):
+    chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     user = MacaronDB.db()['users'].get(user_id, None)
     if user:
@@ -226,11 +256,20 @@ def request_share(update, context):
         _, box = MacaronDB.db().get_box_by_name(box_name)
 
         if box:
-            keyboard = [[InlineKeyboardButton('✔️', callback_data='1:{}:{}'.format(user_id, box['id'])),
-                         InlineKeyboardButton('❌', callback_data='0:{}:{}'.format(user_id, box['id']))]]
+            request = {}
+            request['id'] = MacaronDB.db().get_new_request_id()
+            request['chat_id'] = chat_id
+            request['user_id'] = user_id
+            request['user_name'] = get_user_name(update.effective_user)
+            request['box_id'] = box['id']
+            MacaronDB.db()['requests'].append(request)
+
+            yes = InlineKeyboardButton('✔️', callback_data='1:{}'.format(request['id']))
+            no = InlineKeyboardButton('❌', callback_data='0:{}'.format(request['id']))
+            keyboard = [[yes, no]]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            user_name = update.message.from_user['username']
-            context.bot.send_message(chat_id=box['owner'], text='{} asks for the unlimited and unconditional control over your macarons in the {} box. Do you allow that?'.format(user_name, box_name), reply_markup=reply_markup)
+            context.bot.send_message(chat_id=box['owner'], text='{} asks for the unlimited and unconditional control over your macarons in the {} box. Do you allow that?'.format(request['user_name'], box_name), reply_markup=reply_markup)
+            MacaronDB.db().save()
 
 
 def set_default(update, context):
@@ -425,7 +464,7 @@ def main():
     MacaronDB.db()
 
     # set up logging
-    logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+    logging.basicConfig(filename='mb.log', level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
     # bot API
     updater = Updater(token, use_context=True)
