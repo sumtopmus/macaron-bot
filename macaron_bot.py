@@ -256,20 +256,26 @@ def request_share(update, context):
         _, box = MacaronDB.db().get_box_by_name(box_name)
 
         if box:
-            request = {}
-            request['id'] = MacaronDB.db().get_new_request_id()
-            request['chat_id'] = chat_id
-            request['user_id'] = user_id
-            request['user_name'] = get_user_name(update.effective_user)
-            request['box_id'] = box['id']
-            MacaronDB.db()['requests'].append(request)
+            if user_id != box['owner']:
+                request = {}
+                request['id'] = MacaronDB.db().get_new_request_id()
+                request['chat_id'] = chat_id
+                request['user_id'] = user_id
+                request['user_name'] = get_user_name(update.effective_user)
+                request['box_id'] = box['id']
+                MacaronDB.db()['requests'].append(request)
 
-            yes = InlineKeyboardButton('✔️', callback_data='1:{}'.format(request['id']))
-            no = InlineKeyboardButton('❌', callback_data='0:{}'.format(request['id']))
-            keyboard = [[yes, no]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            context.bot.send_message(chat_id=box['owner'], text='{} asks for the unlimited and unconditional control over your macarons in the {} box. Do you allow that?'.format(request['user_name'], box_name), reply_markup=reply_markup)
-            MacaronDB.db().save()
+                yes = InlineKeyboardButton('✔️', callback_data='1:{}'.format(request['id']))
+                no = InlineKeyboardButton('❌', callback_data='0:{}'.format(request['id']))
+                keyboard = [[yes, no]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                context.bot.send_message(chat_id=box['owner'], text='{} asks for the unlimited and unconditional control over your macarons in the {} box. Do you allow that?'.format(request['user_name'], box_name), reply_markup=reply_markup)
+                MacaronDB.db().save()
+            else:
+                context.bot.send_message(chat_id=chat_id, text='Ой, та ешь, разрешаю.')
+        else:
+            context.bot.send_message(chat_id=chat_id, text='Таких пока не завезли.')
+
 
 
 def set_default(update, context):
