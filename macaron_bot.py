@@ -12,7 +12,7 @@ from telegram.ext import Updater, CommandHandler, CallbackQueryHandler
 
 fmt = '%Y-%m-%d %H:%M:%S'
 token = os.getenv('MACARON_BOT_API_TOKEN')
-admin_chat_id = int(os.getenv('TELEGRAM_ADMIN_ID'))
+admin_id = int(os.getenv('TELEGRAM_ADMIN_ID'))
 
 fail_chance = 0.05
 
@@ -128,7 +128,7 @@ def error(update, context, error):
     try:
         raise context.error
     except telegram.error.Unauthorized:
-        # remove update.message.chat_id from conversation list
+        # remove update.message.user_id from conversation list
         pass
     except telegram.error.BadRequest:
         # handle malformed requests - read more below!
@@ -140,7 +140,7 @@ def error(update, context, error):
         # handle other connection problems
         pass
     except telegram.error.ChatMigrated:
-        # the chat_id of a group has changed, use e.new_chat_id instead
+        # the user_id of a group has changed, use e.new_user_id instead
         pass
     except telegram.error.TelegramError:
         # handle all other telegram related errors
@@ -167,14 +167,14 @@ def permission(update, context):
 
 
 def add_user(update, context):
-    chat_id = update.effective_chat.id
-    if chat_id not in MacaronDB.db()['users']:
+    user_id = update.effective_user.id
+    if user_id not in MacaronDB.db()['users']:
         new_user = {
             'owns': [],
             'eats': [],
             'default': None
         }
-        MacaronDB.db()['users'][chat_id] = new_user
+        MacaronDB.db()['users'][user_id] = new_user
         MacaronDB.db().save()
 
 
@@ -190,6 +190,7 @@ def start(update, context):
 def add_box(update, context):
     add_user(update, context)
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
     try:
         dimensions = list(map(np.uint8, context.args))
         if len(dimensions) != 2:
@@ -201,13 +202,13 @@ def add_box(update, context):
         new_box = {
             'id': new_box_id,
             'name': MacaronDB.db().create_unique_name(new_box_id),
-            'owner': chat_id,
+            'owner': user_id,
             'eaters': [],
             'data': np.ones(dimensions, dtype=bool)
         }
         MacaronDB.db()['boxes'].append(new_box)
-        MacaronDB.db()['users'][chat_id]['owns'].append(new_box_id)
-        MacaronDB.db()['users'][chat_id]['default'] = new_box_id
+        MacaronDB.db()['users'][user_id]['owns'].append(new_box_id)
+        MacaronDB.db()['users'][user_id]['default'] = new_box_id
         MacaronDB.db().save()
         context.bot.send_message(chat_id=chat_id, text='The box {} is set as default and ready to be eaten!'.format(new_box['name']))
         show_box(update, context)
@@ -216,8 +217,8 @@ def add_box(update, context):
 
 
 def request_share(update, context):
-    chat_id = update.effective_chat.id
-    user = MacaronDB.db()['users'].get(chat_id, None)
+    user_id = update.effective_user.id
+    user = MacaronDB.db()['users'].get(user_id, None)
     if user:
         if len(context.args) != 1:
             raise ValueError('Wrong arguments.')
@@ -225,8 +226,8 @@ def request_share(update, context):
         _, box = MacaronDB.db().get_box_by_name(box_name)
 
         if box:
-            keyboard = [[InlineKeyboardButton('✔️', callback_data='1:{}:{}'.format(chat_id, box['id'])),
-                         InlineKeyboardButton('❌', callback_data='0:{}:{}'.format(chat_id, box['id']))]]
+            keyboard = [[InlineKeyboardButton('✔️', callback_data='1:{}:{}'.format(user_id, box['id'])),
+                         InlineKeyboardButton('❌', callback_data='0:{}:{}'.format(user_id, box['id']))]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             user_name = update.message.from_user['username']
             context.bot.send_message(chat_id=box['owner'], text='{} asks for the unlimited and unconditional control over your macarons in the {} box. Do you allow that?'.format(user_name, box_name), reply_markup=reply_markup)
@@ -234,13 +235,14 @@ def request_share(update, context):
 
 def set_default(update, context):
     chat_id = update.effective_chat.id
-    user = MacaronDB.db()['users'].get(chat_id, None)
+    user_id = update.effective_user.id
+    user = MacaronDB.db()['users'].get(user_id, None)
     if user:
         if len(context.args) != 1:
             raise ValueError('Wrong arguments.')
         box_name = context.args[0]
         _, box = MacaronDB.db().get_box_by_name(box_name)
-        if not box or (box['owner'] != chat_id and chat_id not in box['eaters']):
+        if not box or (box['owner'] != user_id and user_id not in box['eaters']):
             context.bot.send_message(chat_id=chat_id, text="Can't find it.")
         else:
             user['default'] = box['id']
@@ -251,13 +253,14 @@ def set_default(update, context):
 
 def show_box(update, context):
     chat_id = update.effective_chat.id
-    user = MacaronDB.db()['users'].get(chat_id, None)
+    user_id = update.effective_user.id
+    user = MacaronDB.db()['users'].get(user_id, None)
     if user:
         box = None
         if len(context.args) == 1:
             box_name = context.args[0]
             _, box = MacaronDB.db().get_box_by_name(box_name)
-            if not box or (box['owner'] != chat_id and chat_id not in box['eaters'] and chat_id != admin_chat_id):
+            if not box or (box['owner'] != user_id and user_id not in box['eaters'] and user_id != admin_id):
                 box = None
                 context.bot.send_message(chat_id=chat_id, text="Can't find it.")
         else:
@@ -275,7 +278,8 @@ def show_box(update, context):
 
 def show_name(update, context):
     chat_id = update.effective_chat.id
-    user = MacaronDB.db()['users'].get(chat_id, None)
+    user_id = update.effective_user.id
+    user = MacaronDB.db()['users'].get(user_id, None)
     if user:
         box_id = user['default']
         if box_id is not None:
@@ -289,7 +293,8 @@ def show_name(update, context):
 
 def show_all(update, context):
     chat_id = update.effective_chat.id
-    user = MacaronDB.db()['users'].get(chat_id, None)
+    user_id = update.effective_user.id
+    user = MacaronDB.db()['users'].get(user_id, None)
     if user:
         n_box_ids = len(user['owns']) + len(user['eats'])
         if n_box_ids > 0:
@@ -313,8 +318,9 @@ def show_all(update, context):
 
 def get_macaron(update, context):
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
     location = None
-    user = MacaronDB.db()['users'].get(chat_id, None)
+    user = MacaronDB.db()['users'].get(user_id, None)
     if user:
         box_id = user['default']
         if box_id is not None:
@@ -338,7 +344,8 @@ def get_macaron(update, context):
 
 def eat_macaron_by_loc(update, context, location):
     chat_id = update.effective_chat.id
-    user = MacaronDB.db()['users'].get(chat_id, None)
+    user_id = update.effective_user.id
+    user = MacaronDB.db()['users'].get(user_id, None)
     if user:
         box_id = user['default']
         if box_id is not None:
@@ -357,7 +364,7 @@ def eat_macaron_by_loc(update, context, location):
                 if not result:
                     if IMAGES_EXIST:
                         with open('images/macaron-gone.gif', 'rb') as f:
-                            context.bot.send_animation(chat_id=chat_id, animation=f)
+                            context.bot.send_animation(chat_id=user_id, animation=f)
                     msg = "МАКАРОН БЫЛ СЪЕДЕН ШПИНАТОМ."
                 context.bot.send_message(chat_id=chat_id, text=msg)
         else:
@@ -380,12 +387,13 @@ def feed_macaron(update, context):
 
 def remove_box(update, context):
     chat_id = update.effective_chat.id
-    user = MacaronDB.db()['users'].get(chat_id, None)
+    user_id = update.effective_user.id
+    user = MacaronDB.db()['users'].get(user_id, None)
     if user:
         box_name = context.args[0]
         index, box = MacaronDB.db().get_box_by_name(box_name)
         if box:
-            if box['owner'] == chat_id:
+            if box['owner'] == user_id:
                 user['owns'].remove(box['id'])
                 if user['default'] == box['id']:
                     user['default'] = None
@@ -407,7 +415,8 @@ def remove_box(update, context):
 
 def admin(update, context):
     chat_id = update.effective_chat.id
-    if chat_id == admin_chat_id:
+    user_id = update.effective_user.id
+    if user_id == admin_id:
         context.bot.send_message(chat_id=chat_id, text=str(MacaronDB.db()))
 
 
