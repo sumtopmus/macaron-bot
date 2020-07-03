@@ -29,7 +29,7 @@ class EmptyBoxException(Exception):
     pass
 
 
-# TODO: replace MacarobDB with PicklePersistence
+# TODO: replace MacaronDB with PicklePersistence
 class MacaronDB(dict):
     DB_PATH = 'data/db.pkl'
     NAMES_FILE = 'data/names.txt'
@@ -126,6 +126,8 @@ def mb_left(box):
 
 def mb_get(box):
     available_macarons = np.asarray(box.nonzero()).transpose()
+    if available_macarons.size == 0:
+        raise EmptyBoxException()
     index = np.random.randint(available_macarons.shape[0])
     return available_macarons[index]
 
@@ -277,7 +279,6 @@ def request_share(update, context):
             context.bot.send_message(chat_id=chat_id, text='Таких пока не завезли.')
 
 
-
 def set_default(update, context):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -373,6 +374,9 @@ def get_macaron(update, context):
             try:
                 location = mb_get(box)
             except EmptyBoxException:
+                if IMAGES_EXIST:
+                    with open('images/macarons-2.gif', 'rb') as f:
+                        context.bot.send_animation(chat_id=chat_id, animation=f)
                 context.bot.send_message(chat_id=chat_id, text='НАТАША, ВСТАВАЙ, ШПИНАТ ВСЁ СЪЕЛА!')
             else:
                 context.bot.send_message(chat_id=chat_id, text='Picking a macaron at row {0} and column {1}.'.format(*((location + 1).tolist())))
@@ -395,23 +399,29 @@ def eat_macaron_by_loc(update, context, location):
         box_id = user['default']
         if box_id is not None:
             box = MacaronDB.db().get_box_by_id(box_id)['data']
-            try:
-                result = mb_eat(box, location)
-            except EmptyBoxException:
+            if mb_left(box) > 0:
+                try:
+                    result = mb_eat(box, location)
+                except EmptyBoxException:
+                    if IMAGES_EXIST:
+                        with open('images/macarons-2.gif', 'rb') as f:
+                            context.bot.send_animation(chat_id=chat_id, animation=f)
+                    context.bot.send_message(chat_id=chat_id, text='НУ СКОЛЬКО МОЖНО ЖРАТЬ???')
+                except IndexError:
+                    context.bot.send_message(chat_id=chat_id, text='Something went wrong with those coordinates.')
+                else:
+                    msg = 'Yummy-yummy.'
+                    if not result:
+                        if IMAGES_EXIST:
+                            with open('images/macaron-gone.gif', 'rb') as f:
+                                context.bot.send_animation(chat_id=user_id, animation=f)
+                        msg = "МАКАРОН БЫЛ СЪЕДЕН ШПИНАТОМ."
+                    context.bot.send_message(chat_id=chat_id, text=msg)
+            else:
                 if IMAGES_EXIST:
                     with open('images/macarons-2.gif', 'rb') as f:
                         context.bot.send_animation(chat_id=chat_id, animation=f)
-                context.bot.send_message(chat_id=chat_id, text='НУ СКОЛЬКО МОЖНО ЖРАТЬ???')
-            except IndexError:
-                context.bot.send_message(chat_id=chat_id, text='Something went wrong with those coordinates.')
-            else:
-                msg = 'Yummy-yummy.'
-                if not result:
-                    if IMAGES_EXIST:
-                        with open('images/macaron-gone.gif', 'rb') as f:
-                            context.bot.send_animation(chat_id=user_id, animation=f)
-                    msg = "МАКАРОН БЫЛ СЪЕДЕН ШПИНАТОМ."
-                context.bot.send_message(chat_id=chat_id, text=msg)
+                context.bot.send_message(chat_id=chat_id, text='НАТАША, ВСТАВАЙ, ШПИНАТ ВСЁ СЪЕЛА!')
         else:
             context.bot.send_message(chat_id=chat_id, text="You don't have any macaron boxes.")
     else:
